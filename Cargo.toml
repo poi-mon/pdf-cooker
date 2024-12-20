@@ -10,3 +10,4 @@ channel = "stable"
 
 [dependencies]
 pin-project = "1"
+bytes = "1"

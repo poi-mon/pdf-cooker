@@ -1,69 +1,79 @@
-use std::pin::Pin;
-use std::marker::PhantomPinned;
+use crate::primitive::*;
+use crate::uid;
 
 use std::collections::HashMap;
 
-use pin_project::*;
-
-use crate::primitive::*;
-
-#[derive(Debug, Clone)]
-#[pin_project]
+#[derive(Debug)]
 pub struct Object {
-    inner: Vec<Primitive>,
-    _pinned: PhantomPinned,
+    uid: u32,
+    pub inner: Vec<Primitive>,
 }
 
 impl Object {
-    pub fn new(inner: impl Into<Vec<Primitive>>) -> Pin<Box<Object>> {
-        Box::pin(Object { inner: inner.into(), _pinned: PhantomPinned })
+    pub fn new(inner: impl Into<Vec<Primitive>>) -> Object {
+        Object {
+            uid: uid::issue(),
+            inner: inner.into(),
+        }
     }
 
-    pub fn resolve(objects: &mut Vec<Pin<Box<Object>>>) {
-        let mut query: HashMap<*const Object, u64> = HashMap::new();
-        let mut xref: HashMap<*const Object, *const Object> = HashMap::new();
+    pub fn encode(&self, writer: &mut impl std::fmt::Write) -> std::fmt::Result {
+        writer.write_fmt(format_args!("{} 0 obj\n", self.uid))?;
+        for prim in self.inner.iter() {
+            prim.encode(0, writer)?;
+        }
+        writer.write_str("\nendobj\n")?;
+        Ok(())
+    }
 
-        for (number, object) in objects.iter_mut().enumerate() {
-            let selfref = object.as_ref().get_ref() as *const Object;
-            query.insert(selfref, number as u64);
-            for prim in object.as_mut().project().inner.iter_mut() {
-                for pp in prim.iter_mut() {
-                    if let Primitive::Defer(ref ptr) = pp {
-                        xref.insert(ptr.clone(), selfref);
-                    }
-                }
+    pub fn resolve_parent_reference(objects: &mut Vec<Object>) {
+        let mut xref: HashMap<u32, u32> = HashMap::new();
+
+        objects.iter().for_each(|obj| 
+            obj.inner.iter().for_each(|prim| linking(obj.uid, prim, &mut xref))
+        );
+
+        objects.iter_mut().for_each(|obj| 
+            obj.inner.iter_mut().for_each(|prim| resolve(obj.uid, prim, &mut xref))
+        );
+
+        fn linking(uid: u32, prim: &Primitive, xref: &mut HashMap<u32, u32>) {
+            match prim {
+                Primitive::Array(array) => array.iter().for_each(|elm| linking(uid, elm, xref)),
+                Primitive::Map(pairs) => pairs.iter().for_each(|pair| linking(uid, &pair.value, xref)),
+                Primitive::Ref(child) => { xref.insert(*child, uid); },
+                _ => {}
             }
         }
 
-        for object in objects.iter_mut() {
-            let selfref = object.as_ref().get_ref() as *const Object;
-            for prim in object.as_mut().project().inner.iter_mut() {
-                for pp in prim.iter_mut() {
-                    if let Primitive::Defer(ref ptr) = pp {
-                        // let number = query.get(ptr).expect("unresolved reference");
-                        // *pp = Primitive::Ref(*number);
-                        if let Some(number) = query.get(ptr) {
-                            *pp = Primitive::Ref(*number);
-                        }
-                    } else if let Primitive::Parent = pp {
-                        let from = xref.get(&selfref).expect("unresolved parent reference");
-                        let number = query.get(from).expect("unresolved indirectrly reference");
-                        *pp = Primitive::Ref(*number);
-                    }
-                }
+        fn resolve(uid: u32, prim: &mut Primitive, xref: &mut HashMap<u32, u32>) {
+            match prim {
+                Primitive::Array(array) => array.iter_mut().for_each(|elm| resolve(uid, elm, xref)),
+                Primitive::Map(pairs) => pairs.iter_mut().for_each(|pair| resolve(uid, &mut pair.value, xref)),
+                Primitive::Parent => {
+                    let parent_uid = xref.get(&uid).expect("unlinked reference");
+                    *prim = Primitive::Ref(*parent_uid);
+                },
+                _ => {}
             }
         }
     }
-}
-
-impl From<&Pin<Box<Object>>> for Primitive {
-    fn from(pin: &Pin<Box<Object>>) -> Primitive {
-        Primitive::Defer(pin.as_ref().get_ref() as *const Object)
-    }
-}
+} 
 
 impl From<&Object> for Primitive {
-    fn from(obj: &Object) -> Primitive {
-        Primitive::Defer(obj as *const Object)
+    fn from(target: &Object) -> Primitive {
+        Primitive::Ref(target.uid)
+    }
+}
+
+impl From<Object> for Vec<Object> {
+    fn from(target: Object) -> Vec<Object> {
+        vec![target]
+    }
+}
+
+impl<T> From<T> for Object where T: Into<Primitive> {
+    fn from(target: T) -> Object {
+        Object::new(target.into())
     }
 }
